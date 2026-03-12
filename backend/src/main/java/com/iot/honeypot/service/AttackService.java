@@ -2,57 +2,101 @@ package com.iot.honeypot.service;
 
 import com.iot.honeypot.db.DatabaseConnection;
 import com.iot.honeypot.entity.AttackLog;
+
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
+/**
+ * AttackService supports two modes:
+ *  - DB-backed (when a JDBC connection is available)
+ *  - In-memory fallback when DB is unavailable (so UI can run without MySQL)
+ */
 public class AttackService {
+
     private final Connection connection;
-    private final List<AttackLogListener> listeners = new ArrayList<>();
+    private final boolean useDb;
+    private final List<AttackLog> inMemoryLogs = Collections.synchronizedList(new ArrayList<>());
+    private long nextId = 1;
 
-    @FunctionalInterface
-    public interface AttackLogListener {
-        void onAttackLogged(AttackLog log);
-    }
-
-    public void addAttackLogListener(AttackLogListener listener) {
-        if (!listeners.contains(listener)) {
-            listeners.add(listener);
+    public AttackService() {
+        Connection conn = null;
+        try {
+            conn = DatabaseConnection.getConnection();
+        } catch (Exception ignored) {
+            // DatabaseConnection prints its own errors
+        }
+        this.connection = conn;
+        this.useDb = (this.connection != null);
+        if (!useDb) {
+            System.out.println("[AttackService] DB unavailable — using in-memory mode.");
+        } else {
+            System.out.println("[AttackService] Using DB-backed mode.");
         }
     }
 
-    public void removeAttackLogListener(AttackLogListener listener) {
-        listeners.remove(listener);
+    // Overload: callers that don't know port can call this
+    public void recordAttack(String protocol, String sourceIp, String payload) {
+        recordAttack(protocol, sourceIp, payload, 0);
     }
 
-    public AttackService() throws SQLException {
-        this.connection = DatabaseConnection.getConnection();
-        initializeDatabase();
+    public void recordAttack(String protocol, String sourceIp, String payload, int port) {
+        if (useDb) {
+            String sql = "INSERT INTO attack_logs (protocol, source_ip, payload, port) VALUES (?, ?, ?, ?)";
+            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                stmt.setString(1, protocol);
+                stmt.setString(2, sourceIp);
+                stmt.setString(3, payload);
+                stmt.setInt(4, port);
+                stmt.executeUpdate();
+                System.out.println("Attack recorded (DB): " + protocol + " from " + sourceIp);
+            } catch (SQLException e) {
+                e.printStackTrace();
+                // fallback to in-memory if DB write fails
+                addInMemory(protocol, sourceIp, payload, port);
+            }
+        } else {
+            addInMemory(protocol, sourceIp, payload, port);
+        }
     }
 
-    private void initializeDatabase() throws SQLException {
-        // Create attack_logs table if it doesn't exist
-        String createTable = 
-            "CREATE TABLE IF NOT EXISTS attack_logs (" +
-            "    id BIGINT AUTO_INCREMENT PRIMARY KEY," +
-            "    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
-            "    protocol VARCHAR(50) NOT NULL," +
-            "    source_ip VARCHAR(50) NOT NULL," +
-            "    payload TEXT," +
-            "    port INT" +
-            ")";
-        
-        try (Statement stmt = connection.createStatement()) {
-            stmt.execute(createTable);
-            // Ensure 'port' column exists for older schemas that may lack it
-            String checkPortColumn = "SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS " +
-                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'attack_logs' AND COLUMN_NAME = 'port'";
-            try (ResultSet rs = stmt.executeQuery(checkPortColumn)) {
-                if (rs.next()) {
-                    int cnt = rs.getInt("cnt");
-                    if (cnt == 0) {
-                        System.out.println("AttackService: 'port' column missing, altering table to add it.");
-                        stmt.execute("ALTER TABLE attack_logs ADD COLUMN port INT");
+    private void addInMemory(String protocol, String sourceIp, String payload, int port) {
+        AttackLog log = new AttackLog(nextId++, new Timestamp(System.currentTimeMillis()), protocol, sourceIp, payload, port);
+        inMemoryLogs.add(0, log); // keep most recent at index 0
+        System.out.println("Attack recorded (MEM): " + protocol + " from " + sourceIp);
+    }
+
+    public List<AttackLog> getAllAttacks() {
+        if (useDb) {
+            List<AttackLog> logs = new ArrayList<>();
+            String sql = "SELECT id, timestamp, protocol, source_ip, payload, port FROM attack_logs ORDER BY timestamp DESC";
+            try (Statement stmt = connection.createStatement();
+                 ResultSet rs = stmt.executeQuery(sql)) {
+
+                while (rs.next()) {
+                    AttackLog log = new AttackLog(
+                            rs.getLong("id"),
+                            rs.getTimestamp("timestamp"),
+                            rs.getString("protocol"),
+                            rs.getString("source_ip"),
+                            rs.getString("payload"),
+                            rs.getInt("port")
+                    );
+                    logs.add(log);
+                }
+
+            } catch (SQLException e) {
+                e.printStackTrace();
+            }
+            return logs;
+        } else {
+            synchronized (inMemoryLogs) {
+                return new ArrayList<>(inMemoryLogs);
+            }
+        }
+    }
+}
                     }
                 }
             }
