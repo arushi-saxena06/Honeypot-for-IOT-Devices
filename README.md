@@ -1,7 +1,6 @@
-# IoT-Malicious-Traffic-Monitor
+# Honeypot-for-IOT-Devices
 
-A network security project designed to monitor and capture suspicious or malicious traffic targeting IoT devices.
-The system logs incoming requests and analyzes packet activity to help study potential attack patterns against IoT environments.
+This project uses an IoT honeypot, which mimics vulnerable IoT devices to detect malicious activities. It records the activities of attackers, such as IP addresses, request patterns, and payload, which are then displayed on a real-time monitoring dashboard.
 
 ## Tech Stack
 
